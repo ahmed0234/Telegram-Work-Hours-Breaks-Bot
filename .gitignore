@@ -1,0 +1,7 @@
+/node_modules
+/.env
+/node_modules/dist
+.DS_Store      
+/older
+/older/index.js
+older/index.js
