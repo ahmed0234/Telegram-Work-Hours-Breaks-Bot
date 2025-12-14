@@ -28,6 +28,7 @@ const bot = new TelegramBot(process.env.BOT_TOKEN, { polling: true });
 // 4. Helpers (Cambodia Time)
 const getToday = () =>
   new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Phnom_Penh" });
+
 const getTime = () =>
   new Date().toLocaleTimeString("en-GB", {
     timeZone: "Asia/Phnom_Penh",
@@ -53,6 +54,42 @@ function formatDuration(totalMinutes) {
   return parts.join("") || "0秒";
 }
 
+// --- NEW HELPER: Check Lateness ---
+function getLatenessWarning() {
+  // Get current time specifically for Cambodia
+  const now = new Date();
+  const cambodiaDate = new Date(
+    now.toLocaleString("en-US", { timeZone: "Asia/Phnom_Penh" })
+  );
+
+  const dayOfWeek = cambodiaDate.getDay(); // 0 = Sunday, 1 = Monday, etc.
+  const hours = cambodiaDate.getHours();
+  const minutes = cambodiaDate.getMinutes();
+  const seconds = cambodiaDate.getSeconds();
+
+  // Determine deadline hour based on day
+  // Sunday (0) = 14:00 (2 PM), Others = 11:00 (11 AM)
+  const limitHour = dayOfWeek === 0 ? 14 : 11;
+
+  // Check if late (Strict check: even 1 second passed the hour)
+  // Logic: If Hour > Limit OR (Hour == Limit AND (Minute > 0 OR Second > 0))
+  let isLate = false;
+  
+  if (hours > limitHour) {
+    isLate = true;
+  } else if (hours === limitHour) {
+    if (minutes > 0 || seconds > 0) {
+      isLate = true;
+    }
+  }
+
+  if (isLate) {
+    return `\n\n🔴 <b>WARNING: YOU ARE LATE</b> 🔴\n⚠️ <b>You are late, and you are fined.</b>\n⚠️ <b>你迟到了，你将被罚款。</b>`;
+  }
+
+  return ""; // Not late
+}
+
 const ICONS = { Work: "💼", Eat: "🍔", Toilet: "🚽", Smoke: "🚬" };
 
 const catNames = {
@@ -62,15 +99,12 @@ const catNames = {
   Smoke: { cn: "抽烟", en: "Smoke" },
 };
 
-// 5. 独立计算每个人的本次总结 (FIXED: Accepts record directly)
+// 5. 独立计算每个人的本次总结
 function buildSessionSummary(record, userName) {
   if (!record || record.activities.length === 0) {
     return "📝 <b>本次工作总结</b>\n<i>暂无活动记录</i>";
   }
 
-  // Find the last SessionEnd to calculate "Current Session"
-  // Note: We use findLastIndex if available, or reverse search logic
-  // Here we use standard logic: find the index of the last SessionEnd occurrence
   let sessionStartIndex = -1;
   for (let i = record.activities.length - 1; i >= 0; i--) {
     if (record.activities[i].category === "SessionEnd") {
@@ -79,7 +113,6 @@ function buildSessionSummary(record, userName) {
     }
   }
   
-  // Start from the item AFTER the last SessionEnd, or 0 if none found
   sessionStartIndex = sessionStartIndex === -1 ? 0 : sessionStartIndex + 1;
   const sessionActivities = record.activities.slice(sessionStartIndex);
 
@@ -88,7 +121,6 @@ function buildSessionSummary(record, userName) {
   let summaryText = "";
 
   ["Work", "Eat", "Toilet", "Smoke"].forEach((cat) => {
-    // Calculate total minutes for this category in the current session
     const totalMins = sessionActivities
       .filter((a) => a.category === cat && a.end)
       .reduce((sum, a) => sum + getDurationMinutes(a.start, a.end), 0);
@@ -139,7 +171,6 @@ bot.onText(/\/start/, async (msg) => {
   const userId = msg.from.id;
   const userName = msg.from.first_name || "用户";
 
-  // Ensure today's record exists
   await Activity.findOneAndUpdate(
     { user_id: userId, date: getToday() },
     { user_id: userId, date: getToday(), activities: [] },
@@ -164,14 +195,12 @@ bot.on("message", async (msg) => {
   const today = getToday();
   const timeNow = getTime();
 
-  // Get current user's record
   let record = await Activity.findOne({ user_id: userId, date: today });
 
   if (!record) {
     record = new Activity({ user_id: userId, date: today, activities: [] });
   }
 
-  // Stop previous activity
   const stopPrevious = () => {
     const last = record.activities[record.activities.length - 1];
     if (last && !last.end && last.category !== "SessionEnd") {
@@ -190,7 +219,17 @@ bot.on("message", async (msg) => {
     case "💼 开始工作 / Start Work":
       prevInfo = stopPrevious();
       record.activities.push({ category: "Work", start: timeNow });
+      
+      // --- CHECK LATENESS ---
+      const lateWarning = getLatenessWarning();
+      
       response = `💼 <b>开始工作 / Work Started</b>\n👤 <b>${userName}</b>\n🕐 时间 / Time: ${timeNow}`;
+      
+      // Append warning if exists
+      if (lateWarning) {
+          response += lateWarning;
+      }
+
       if (prevInfo)
         response += `\n\n✅ 上一个活动结束 / Previous ended:\n${
           prevInfo.text
@@ -238,14 +277,11 @@ bot.on("message", async (msg) => {
       break;
 
     case "📊 本次总结 / Session Summary":
-      // FIXED: Pass 'record' directly
       response = buildSessionSummary(record, userName);
       break;
 
     case "🏁 下班 / Off Work":
       prevInfo = stopPrevious();
-      
-      // FIXED: Generate summary BEFORE pushing "SessionEnd", so it calculates the work just finished
       const summary = buildSessionSummary(record, userName);
 
       record.activities.push({
